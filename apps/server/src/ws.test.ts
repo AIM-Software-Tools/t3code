@@ -145,7 +145,10 @@ it.effect("resends late editors without rolling back updates already sent", () =
   Effect.gen(function* () {
     const settingsSent = yield* Deferred.make<void>();
     const events = yield* withLateConfigDiscovery(
-      snapshotConfig({ settings: { enableProviderUpdateChecks: true } as never }),
+      snapshotConfig({
+        availableEditorsPending: true,
+        settings: { enableProviderUpdateChecks: true } as never,
+      }),
       Stream.make(settingsUpdated({ enableProviderUpdateChecks: false })),
       {
         resolveAvailableEditors: () => Effect.succeed(["file-manager"]),
@@ -166,8 +169,26 @@ it.effect("resends late editors without rolling back updates already sent", () =
     assert.equal(second?.type, "snapshot");
     if (second?.type === "snapshot") {
       assert.deepEqual(second.config.availableEditors, ["file-manager"]);
+      assert.isFalse(second.config.availableEditorsPending);
       assert.equal(second.config.shellRevealInFileManagerKind, "file-explorer");
       assert.deepEqual(second.config.settings, { enableProviderUpdateChecks: false } as never);
+    }
+    const empty = yield* withLateConfigDiscovery(
+      snapshotConfig({ availableEditorsPending: true }),
+      Stream.empty,
+      {
+        resolveAvailableEditors: () => Effect.succeed([]),
+        // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
+        resolveFileManagerRevealKind: () => Effect.succeed(undefined),
+      },
+      { resolveTargets: () => Effect.succeed([]) },
+    ).pipe(Stream.runCollect);
+    assert.equal(empty.length, 1);
+    const resolved = empty[0];
+    assert.equal(resolved?.type, "snapshot");
+    if (resolved?.type === "snapshot") {
+      assert.deepEqual(resolved.config.availableEditors, []);
+      assert.isFalse(resolved.config.availableEditorsPending);
     }
   }),
 );
@@ -632,6 +653,7 @@ it.effect.each(["pending", "cached"] as const)(
       );
       const initialKeybindings = (yield* keybindings.getSnapshot).keybindings;
       const discoveryStarted = yield* Deferred.make<void>();
+      const endpointsResolved = yield* Deferred.make<void>();
       const finishDiscovery = yield* Deferred.make<void>();
       const remoteDiscoveryStarted = yield* Deferred.make<void>();
       const finishRemoteDiscovery = yield* Deferred.make<void>();
@@ -642,6 +664,7 @@ it.effect.each(["pending", "cached"] as const)(
         Layer.mock(ExternalLauncher.ExternalLauncher)({
           resolveAvailableEditors: () =>
             Deferred.succeed(discoveryStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(endpointsResolved)),
               Effect.andThen(Deferred.await(finishDiscovery)),
               Effect.as([]),
             ),
@@ -662,7 +685,9 @@ it.effect.each(["pending", "cached"] as const)(
               Effect.as(targets),
             ),
         }),
-        Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
+        Layer.mock(DirectEndpoints.DirectEndpoints)({
+          resolve: () => Deferred.succeed(endpointsResolved, undefined).pipe(Effect.as([])),
+        }),
         Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
           scratchRoot: Effect.succeedNone,
           namedProjectsRoot: process.cwd(),
@@ -734,22 +759,20 @@ it.effect.each(["pending", "cached"] as const)(
         payload: {},
         headers: Headers.empty,
       });
-      yield* Deferred.await(discoveryStarted);
-      assert.isTrue(yield* Deferred.isDone(remoteDiscoveryStarted));
-
-      const duringDiscovery = yield* settings.updateSettings({ defaultAutoPull: true });
-      yield* Deferred.succeed(finishDiscovery, undefined);
       const snapshot = yield* Queue.take(responses);
       assert.equal(snapshot.type, "snapshot");
       if (snapshot.type !== "snapshot") return yield* Effect.die("Missing initial snapshot");
       assert.deepEqual(snapshot.config.remoteOpenTargets, discovery === "cached" ? targets : []);
       assert.isFalse(snapshot.config.settings.defaultAutoPull);
+      assert.isTrue(snapshot.config.availableEditorsPending);
       assert.deepEqual(snapshot.config.keybindings, initialKeybindings);
       const duringAck = yield* keybindings.upsertKeybindingRule({
         key: "mod+alt+y",
         command: "terminal.toggle",
       });
       yield* acknowledge;
+      yield* Deferred.await(discoveryStarted);
+      const duringDiscovery = yield* settings.updateSettings({ defaultAutoPull: true });
       yield* Deferred.await(keybindingsSubscribed);
       yield* Deferred.await(settingsSubscribed);
 
@@ -779,6 +802,19 @@ it.effect.each(["pending", "cached"] as const)(
       }
       assert.isEmpty(expectedSettings);
       assert.isEmpty(expectedKeybindings);
+      yield* Deferred.succeed(finishDiscovery, undefined);
+      const editors = yield* Queue.take(responses);
+      assert.equal(editors.type, "snapshot");
+      if (editors.type === "snapshot") {
+        assert.isFalse(editors.config.availableEditorsPending);
+        assert.deepEqual(editors.config.availableEditors, []);
+        assert.deepEqual(
+          editors.config.settings,
+          ServerSettings.redactServerSettingsForClient(latestSettings),
+        );
+        assert.deepEqual(editors.config.keybindings, latestKeybindings.keybindings);
+      }
+      yield* acknowledge;
       if (discovery === "pending") {
         yield* Deferred.await(remoteDiscoveryStarted);
         yield* Deferred.succeed(finishRemoteDiscovery, undefined);
@@ -920,6 +956,10 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
     const snapshot = (yield* Queue.take(responses)) as ServerConfigStreamEvent;
     if (snapshot.type !== "snapshot") return yield* Effect.die("Missing initial snapshot");
     assert.isUndefined(snapshot.config.providers[0]?.workspaceSnapshots);
+    yield* server.write(0, { _tag: "Ack", requestId: configRequest });
+    const editors = (yield* Queue.take(responses)) as ServerConfigStreamEvent;
+    if (editors.type !== "snapshot") return yield* Effect.die("Missing editor inventory");
+    assert.isFalse(editors.config.availableEditorsPending);
     yield* server.write(0, { _tag: "Ack", requestId: configRequest });
 
     // A rescan that only touches a snapshot sends nothing; the next real change does.

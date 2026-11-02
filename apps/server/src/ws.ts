@@ -323,6 +323,7 @@ export const withLateConfigDiscovery = <E, R>(
   const lateEditorConfig = Stream.fromEffect(launcher.resolveAvailableEditors()).pipe(
     Stream.filter(
       (editors) =>
+        config.availableEditorsPending === true ||
         editors.join() !== config.availableEditors.join() ||
         (editors.includes("file-manager") && config.shellRevealInFileManagerKind === undefined),
     ),
@@ -333,6 +334,7 @@ export const withLateConfigDiscovery = <E, R>(
     ),
     Stream.filter(
       (editorConfig) =>
+        config.availableEditorsPending === true ||
         editorConfig.availableEditors.join() !== config.availableEditors.join() ||
         editorConfig.shellRevealInFileManagerKind !== config.shellRevealInFileManagerKind,
     ),
@@ -358,7 +360,7 @@ export const withLateConfigDiscovery = <E, R>(
               shellRevealInFileManagerKind: _revealKind,
               ...rest
             } = current;
-            const next = { ...rest, ...event.editorConfig };
+            const next = { ...rest, ...event.editorConfig, availableEditorsPending: false };
             return [next, [{ version: 1, type: "snapshot", config: next }]];
           }
           case "remoteOpenTargetsResolved": {
@@ -383,21 +385,24 @@ export const withLateConfigDiscovery = <E, R>(
 // Discoveries run side by side so the slowest one, not their sum, bounds the
 // server config snapshot. Each degrades on timeout rather than failing it.
 export const resolveOpenDiscoveryForConfig = <T, D, E1, R1, E2, R2, E3, R3, E4, R4>(discovery: {
-  readonly editors: Effect.Effect<ReadonlyArray<EditorId>, E1, R1>;
+  readonly editors: Effect.Effect<ReadonlyArray<EditorId>, E1, R1> | undefined;
   readonly fileManagerRevealKind: Effect.Effect<FileManagerRevealKind | undefined, E2, R2>;
   readonly remoteOpenTargets: Effect.Effect<ReadonlyArray<T>, E3, R3>;
   readonly directEndpoints: Effect.Effect<ReadonlyArray<D>, E4, R4>;
 }) =>
   Effect.all(
     {
-      editorConfig: resolveAvailableEditorsForConfig(discovery.editors).pipe(
-        Effect.flatMap((availableEditors) =>
-          resolveEditorConfig(
-            availableEditors,
-            resolveFileManagerRevealKindForConfig(discovery.fileManagerRevealKind),
-          ),
-        ),
-      ),
+      editorConfig:
+        discovery.editors === undefined
+          ? Effect.succeed({ availableEditors: [], availableEditorsPending: true })
+          : resolveAvailableEditorsForConfig(discovery.editors).pipe(
+              Effect.flatMap((availableEditors) =>
+                resolveEditorConfig(
+                  availableEditors,
+                  resolveFileManagerRevealKindForConfig(discovery.fileManagerRevealKind),
+                ),
+              ),
+            ),
       // Same discovery-with-timeout treatment as editors: a slow probe must
       // not stall server.getConfig, so it degrades to an empty list.
       remoteOpenTargets: resolveAvailableEditorsForConfig(discovery.remoteOpenTargets),
@@ -1768,30 +1773,47 @@ export const layerWsRpc = (
         readonly usageLimitsCommand: boolean;
         readonly workspaceSnapshotsOnDemand: boolean;
         readonly deferRemoteOpenTargets: boolean;
+        readonly deferEditors?: boolean;
       }) {
-        const keybindingsConfig = yield* keybindings.loadConfigState;
-        const currentProviders = yield* providerRegistry.getProviders;
+        const {
+          keybindingsConfig,
+          currentProviders,
+          settings,
+          environment,
+          auth,
+          scratchWorkspaceRoot,
+          lastEventLoopStall,
+          discovery,
+        } = yield* Effect.all(
+          {
+            keybindingsConfig: keybindings.loadConfigState,
+            currentProviders: providerRegistry.getProviders,
+            settings: serverSettings.getSettings.pipe(
+              Effect.map(ServerSettings.redactServerSettingsForClient),
+            ),
+            environment: serverEnvironment.getDescriptor,
+            auth: serverAuth.getDescriptor(),
+            scratchWorkspaceRoot: managedFolders.scratchRoot,
+            lastEventLoopStall: eventLoopMonitor.latestNoticeableStall,
+            discovery: resolveOpenDiscoveryForConfig({
+              editors: options.deferEditors
+                ? undefined
+                : externalLauncher.resolveAvailableEditors(),
+              fileManagerRevealKind: externalLauncher.resolveFileManagerRevealKind(),
+              remoteOpenTargets: options.deferRemoteOpenTargets
+                ? Effect.succeed([])
+                : remoteOpenTargets.resolveTargets(),
+              directEndpoints: directEndpoints.resolve(),
+            }),
+          },
+          { concurrency: "unbounded" },
+        );
         const commandProviders = options.usageLimitsCommand
           ? withUsageLimitsCommands(currentProviders, yield* usageLimitSources.current)
           : currentProviders;
         const providers = options.workspaceSnapshotsOnDemand
           ? withoutWorkspaceSnapshots(commandProviders)
           : commandProviders;
-        const settings = ServerSettings.redactServerSettingsForClient(
-          yield* serverSettings.getSettings,
-        );
-        const environment = yield* serverEnvironment.getDescriptor;
-        const auth = yield* serverAuth.getDescriptor();
-        const scratchWorkspaceRoot = yield* managedFolders.scratchRoot;
-        const lastEventLoopStall = yield* eventLoopMonitor.latestNoticeableStall;
-        const discovery = yield* resolveOpenDiscoveryForConfig({
-          editors: externalLauncher.resolveAvailableEditors(),
-          fileManagerRevealKind: externalLauncher.resolveFileManagerRevealKind(),
-          remoteOpenTargets: options.deferRemoteOpenTargets
-            ? Effect.succeed([])
-            : remoteOpenTargets.resolveTargets(),
-          directEndpoints: directEndpoints.resolve(),
-        });
 
         return {
           environment,
@@ -3154,6 +3176,7 @@ export const layerWsRpc = (
                 usageLimitsCommand,
                 workspaceSnapshotsOnDemand,
                 deferRemoteOpenTargets: true,
+                deferEditors: true,
               });
               const keybindingsUpdates = keybindingsChanges.pipe(
                 Stream.map((event) => ({

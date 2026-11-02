@@ -163,6 +163,7 @@ export const listen: Effect.Effect<
   );
 
   const windowRef = yield* Ref.make(Option.none<Electron.BrowserWindow>());
+  const hasStartedRef = yield* Ref.make(false);
   // The failure that opened the window; later restarts do not reload its details.
   const failureRef = yield* Ref.make(Option.none<BackendStartupFailure>());
   const renderedHtmlRef = yield* Ref.make("");
@@ -230,8 +231,8 @@ export const listen: Effect.Effect<
   const show = Effect.fn("desktop.startupRecovery.show")(
     function* () {
       if (yield* Ref.get(quitting)) return;
-      // A backend that crashes after the app opened is reported by the app itself.
-      if (Option.isSome(yield* electronWindow.main)) return;
+      // The early main window cannot report failures until its backend has first started.
+      if ((yield* Ref.get(hasStartedRef)) && Option.isSome(yield* electronWindow.main)) return;
       const existing = yield* Ref.get(windowRef);
       if (Option.isSome(existing) && !existing.value.isDestroyed()) {
         yield* electronWindow.reveal(existing.value);
@@ -303,6 +304,7 @@ export const listen: Effect.Effect<
     Stream.runForEach(
       Effect.fn("desktop.startupRecovery.onStartupChange")(function* (startup) {
         if (startup._tag === "Ready") {
+          yield* Ref.set(hasStartedRef, true);
           yield* Ref.set(failureRef, Option.none());
           yield* close;
           yield* rememberStartedVersion;
