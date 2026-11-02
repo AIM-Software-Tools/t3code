@@ -499,6 +499,7 @@ export function ThreadRelationshipsPanel(props: {
           input: { threadIds: unlistedThreadIds },
         }),
   );
+  const resolvedThreadTitles = threadTitles.data ?? {};
   // Omitted and archived threads remain reachable; only a settled lookup proves one is gone.
   const visibleRelationships = relationshipRows.filter(
     ({ threadId, edge }) =>
@@ -506,7 +507,7 @@ export function ThreadRelationshipsPanel(props: {
       !unlistedThreadIds.includes(threadId) ||
       !threadTitles.isSuccess ||
       threadTitles.isPending ||
-      threadTitles.data?.[threadId] !== undefined,
+      Object.hasOwn(resolvedThreadTitles, threadId),
   );
   const canDetach = projection ? canDetachThreadProviderSession(projection) : false;
 
@@ -690,7 +691,9 @@ export function ThreadRelationshipsPanel(props: {
       title:
         workflowGroup?.workflow.workflowName ??
         // Fresher than an archived snapshot's copy.
-        threadTitles.data?.[threadId] ??
+        (Object.hasOwn(resolvedThreadTitles, threadId)
+          ? resolvedThreadTitles[threadId]
+          : undefined) ??
         node?.thread?.title ??
         agent?.title ??
         threadId,

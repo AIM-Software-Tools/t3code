@@ -363,6 +363,7 @@ it("shows a delegated-from thread's full title in its tooltip even when its envi
 it.each([
   {
     name: "an omitted existing fork",
+    id: "constructor",
     exists: true,
     success: true,
     pending: false,
@@ -370,7 +371,8 @@ it.each([
     visible: true,
   },
   {
-    name: "a deleted fork",
+    name: "a deleted fork named constructor",
+    id: "constructor",
     exists: false,
     success: true,
     pending: false,
@@ -394,7 +396,8 @@ it.each([
     visible: false,
   },
   {
-    name: "an unresolved fork",
+    name: "an unresolved fork named toString",
+    id: "toString",
     exists: false,
     success: true,
     pending: true,
@@ -411,10 +414,10 @@ it.each([
   },
 ])(
   "keeps or hides $name after checking its existence",
-  async ({ exists, success, pending, archived, visible }) => {
+  async ({ exists, success, pending, archived, visible, id = "deleted-fork" }) => {
     setup();
     const projection = makeThreadProjectionFixture();
-    const deletedId = ThreadId.make("deleted-fork");
+    const deletedId = ThreadId.make(id);
     const title = "Example fork";
     state.threadTitles = exists ? { [deletedId]: title } : {};
     state.titleLookup = { isSuccess: success, isPending: pending };
