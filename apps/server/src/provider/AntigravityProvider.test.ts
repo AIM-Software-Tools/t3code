@@ -158,13 +158,8 @@ const makeHarness = Effect.fn("makeAntigravityProviderHarness")(function* (
       ),
     },
   );
-  const initialUpdate = yield* Stream.toPull(
-    provider.snapshot.streamChanges.pipe(
-      Stream.filter((snapshot) => snapshot.installed || snapshot.status === "error"),
-    ),
-  );
   const initialize = Deferred.succeed(initialProbe, initializeResult).pipe(
-    Effect.andThen(initialUpdate),
+    Effect.andThen(provider.snapshot.ensureReady!),
     Effect.asVoid,
   );
   return {
@@ -174,7 +169,6 @@ const makeHarness = Effect.fn("makeAntigravityProviderHarness")(function* (
     safety,
     safetyCalls,
     initialProbe,
-    initialUpdate,
     initialize,
   };
 });
@@ -321,6 +315,7 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
             auth: { status: "unknown" },
             models: [],
           });
+          expect(yield* Ref.get(harness.probeCalls)).toBe(0);
           yield* harness.initialize;
           const snapshot = yield* harness.provider.snapshot.getSnapshot;
           expect(snapshot).toMatchObject({
@@ -452,7 +447,7 @@ it.layer(layerTest)("Antigravity provider snapshots", (it) => {
           ...initializeResult,
           agentInfo: { ...initializeResult.agentInfo, version: "unknown" },
         });
-        yield* harness.initialUpdate;
+        yield* harness.provider.snapshot.ensureReady!;
         expect((yield* harness.provider.snapshot.getSnapshot).version).toBeNull();
       }),
     ),
